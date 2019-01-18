@@ -570,5 +570,13 @@ class TestKerasTF2ONNX(unittest.TestCase):
         expected = model.predict([data1, data2])
         self.assertTrue(self.run_onnx_runtime('channel_first_input', onnx_model, [data_transpose, data2], expected))
 
+        data1 = np.random.rand(N, W, H, C).astype(np.float32).reshape((N, W, H, C))
+        data2 = np.random.rand(N, W, H, C).astype(np.float32).reshape((N, W, H, C))
+        data_transpose = np.transpose(data1, (0, 3, 1, 2))
+        self.assertTrue(data_transpose.shape == (N, C, W, H))
+
+        expected = model.predict([data1, data2])
+        self.assertTrue(self.run_onnx_runtime('channel_first_input', onnx_model, [data_transpose, data2], expected))
+
 if __name__ == "__main__":
     unittest.main()
