@@ -43,7 +43,9 @@ class YOLOEvaluationLayer(keras.layers.Layer):
 
     def call(self, inputs, **kwargs):
         """Evaluate YOLO model on given input and return filtered boxes."""
-        yolo_outputs, input_image_shape = (inputs[0:3], inputs[3])
+        # yolo_outputs, input_image_shape = (inputs[0:3], inputs[3])
+        yolo_outputs = inputs[0:3]
+        input_image_shape = K.constant([224, 224])
         num_layers = len(yolo_outputs)
         anchor_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]] if num_layers == 3 else [[3, 4, 5],
                                                                                  [1, 2, 3]]  # default setting
@@ -146,13 +148,15 @@ class YOLO(object):
                    num_anchors / len(self.yolo_model.output) * (num_classes + 5), \
                 'Mismatch between model and given anchor and class sizes'
 
-        input_image_shape = keras.Input(shape=(2,))
-        image_input = keras.Input((None, None, 3), dtype='float32')
+        input_image_shape = K.constant([224, 224], dtype='int32')
+        # keras.Input(shape=(2,))
+        #image_input = keras.Input((None, None, 3), dtype='float32')
+        image_input = keras.Input((224, 224, 3), dtype='float32')
         y1, y2, y3 = self.yolo_model(image_input)
         out_boxes, out_scores, out_classes = \
             YOLOEvaluationLayer(anchors=self.anchors, num_classes=len(self.class_names))(
-                inputs=[y1, y2, y2, input_image_shape])
-        self.final_model = keras.Model(inputs=[image_input, input_image_shape],
+                inputs=[y1, y2, y3])
+        self.final_model = keras.Model(inputs=[image_input],
                                        outputs=[out_boxes, out_scores, out_classes])
         self.final_model.save('model_data/merged_keras.h5')
         print('{} model, anchors, and classes loaded.'.format(model_path))
@@ -289,10 +293,16 @@ def on_Round(ctx, node, name, args):
     return node
 
 
+def on_StridedSlice(ctx, node, name, args):
+    node.type = "Reverse"
+    return node
+
+
 _custom_op_handlers={
             'Where': on_Where,
             'NonMaxSuppressionV3': on_NonMaxSuppressionV3,
-            'Round': on_Round }
+            'Round': on_Round,
+            'StridedSlice': on_StridedSlice }
 
 
 def convert_model(yolo, name):
