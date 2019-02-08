@@ -19,6 +19,8 @@ import yolo3
 from yolo3.model import yolo_eval, yolo_body, tiny_yolo_body, yolo_boxes_and_scores
 from yolo3.utils import letterbox_image
 
+from onnx import onnx_pb
+from tf2onnx import utils
 
 class YOLOEvaluationLayer(keras.layers.Layer):
 
@@ -270,7 +272,7 @@ class YOLO(object):
 def detect_img(yolo, name):
     import onnxruntime
     image = Image.open(name)
-    yolo.session = onnxruntime.InferenceSession('model_data/yolov3_.onnx')
+    yolo.session = onnxruntime.InferenceSession('model_data/yolov3.onnx')
     r_image = yolo.detect_with_onnx(image)
 
     n_ext = name.rindex('.')
@@ -294,20 +296,156 @@ def on_Round(ctx, node, name, args):
 
 
 def on_StridedSlice(ctx, node, name, args):
-    node.type = "Reverse"
-    return node
+    # node.type = "Reverse"
+    # for now we implement common cases. Things like strides!=1 are not mappable to onnx.
+    not_supported_attr = ["new_axis_mask"]
+    for attr_name in not_supported_attr:
+        attr = node.get_attr(attr_name)
+        if attr is not None and attr.i != 0:
+            raise ValueError("StridedSlice: attribute " + attr_name + " not supported")
+    input_shape = ctx.get_shape(node.input[0])
+    begin = node.inputs[1].get_tensor_value()
+    end = node.inputs[2].get_tensor_value()
+    strides = node.inputs[3].get_tensor_value()
+    end_mask = node.get_attr("end_mask")
+    end_mask = end_mask.i if end_mask is not None else 0
+    ellipsis_mask = node.get_attr("ellipsis_mask")
+    ellipsis_mask = ellipsis_mask.i if ellipsis_mask is not None else 0
+    shrink_axis_mask = node.get_attr("shrink_axis_mask")
+    shrink_axis_mask = shrink_axis_mask.i if shrink_axis_mask is not None else 0
+    new_begin = []
+    new_end = []
+    axes = []
+    # onnx slice op can't remove a axis, track axis and add a squeeze op if needed
+    needs_squeeze = []
+    for idx, begin_item in enumerate(begin):
+        end_item = end[idx]
+        # if strides[idx] != 1:
+        # raise ValueError("StridedSlice: only strides=1 is supported, current stride =" + str(strides[idx]))
+        axes.append(idx)
+
+        if (ellipsis_mask >> idx) & 1:
+            new_begin.append(0)
+            new_end.append(sys.maxsize)
+            continue
+
+        # an implicit condition is stride == 1 (checked in above)
+        if begin_item < 0 and end_item == 0:
+            end_item = sys.maxsize
+
+        mask = (shrink_axis_mask >> idx) & 1
+        if mask != 0:
+            new_begin.append(begin_item)
+            new_end.append(end_item)
+            needs_squeeze.append(idx)
+            continue
+
+        new_begin.append(begin_item)
+        mask = (end_mask >> idx) & 1
+        if mask != 0:
+            new_end.append(sys.maxsize)
+        else:
+            new_end.append(end_item)
+
+    node.set_attr("starts", new_begin)
+    node.set_attr("ends", new_end)
+    node.set_attr("axes", axes)
+    node.type = "Slice"
+    ctx.remove_input(node, node.input[3])
+    ctx.remove_input(node, node.input[2])
+    ctx.remove_input(node, node.input[1])
+    nodes = [node]
+    if needs_squeeze:
+        name = utils.make_name(node.name)
+        squeeze_node = ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
+        squeeze_node.set_attr("axes", needs_squeeze)
+        nodes.append(squeeze_node)
+        input_dtype = ctx.get_dtype(node.output[0])
+        ctx.set_dtype(squeeze_node.output[0], input_dtype)
+        ctx.copy_shape(node.output[0], squeeze_node.output[0])
+
+    # onnx slice as of opset 7 does only take float tensors ... cast if needed
+    input_dtype = ctx.get_dtype(node.input[0])
+    if input_dtype != onnx_pb.TensorProto.FLOAT:
+        if node.inputs[0].type == "Cast":
+            # override the previous cast
+            cast_node = node.inputs[0]
+        else:
+            cast_node = ctx.insert_new_node_on_input(node, "Cast", node.input[0])
+            nodes.insert(0, cast_node)
+        cast_node.set_attr("to", onnx_pb.TensorProto.FLOAT)
+        ctx.set_dtype(cast_node.output[0], onnx_pb.TensorProto.FLOAT)
+        ctx.copy_shape(node.input[0], cast_node.output[0])
+        # undo the cast afer slice
+        name = utils.make_name(node.name)
+        cast_node = ctx.insert_new_node_on_output("Cast", nodes[-1].output[0], name)
+        cast_node.set_attr("to", input_dtype)
+        ctx.set_dtype(cast_node.output[0], input_dtype)
+        ctx.copy_shape(node.output[0], cast_node.output[0])
+        nodes.append(cast_node)
+    return nodes
+
+
+def on_ResizeBilinear(ctx, node, name, args):
+    # float32 out = ResizeBilinear/ResizeNearestNeighbor(T images, int size)
+    # https://www.tensorflow.org/api_docs/python/tf/image/resize_nearest_neighbor
+    # wants the input to be NHWC - adjust target_shape to this.
+    ori_shape = ctx.make_node("Shape", [node.input[0]])
+    ori_shape_hw = ctx.make_node("Slice", ori_shape.output, {"axes": [0], "starts": [1], "ends": [3]})
+    ori_shape_hw_float = ctx.make_node("Cast", ori_shape_hw.output, attr={"to": onnx_pb.TensorProto.FLOAT})
+
+    target_hw = node.inputs[1]
+    target_hw_float = ctx.make_node("Cast", target_hw.output, attr={"to": onnx_pb.TensorProto.FLOAT})
+
+    scales_hw = ctx.make_node("Div", [target_hw_float.output[0], ori_shape_hw_float.output[0]])
+
+    const_one_array = ctx.make_const(utils.make_name("one"), np.array([1.0, 1.0]).astype(np.float32))
+    # scaler is nchw
+    scales = ctx.make_node("Concat", [const_one_array.output[0], scales_hw.output[0]], {"axis": 0})
+    input_nchw = ctx.make_node("Transpose", [node.input[0]], {"perm": [0, 3, 1, 2]})
+    upsample = ctx.make_node("Upsample", [input_nchw.output[0], scales.output[0]], attr={"mode": "linear"})
+    res = ctx.make_node("Transpose", upsample.output, {"perm": [0, 2, 3, 1]},
+                        name=node.name, outputs=node.output)
+    return [ori_shape, ori_shape_hw, ori_shape_hw_float, target_hw_float, scales_hw,
+            const_one_array, scales, input_nchw, upsample, res]
+
+
+def on_ResizeNearestNeighbor(ctx, node, name, args):
+    # float32 out = ResizeBilinear/ResizeNearestNeighbor(T images, int size)
+    # https://www.tensorflow.org/api_docs/python/tf/image/resize_nearest_neighbor
+    # wants the input to be NHWC - adjust target_shape to this.
+    ori_shape = ctx.make_node("Shape", [node.input[0]])
+    ori_shape_hw = ctx.make_node("Slice", ori_shape.output, {"axes": [0], "starts": [1], "ends": [3]})
+    ori_shape_hw_float = ctx.make_node("Cast", ori_shape_hw.output, attr={"to": onnx_pb.TensorProto.FLOAT})
+
+    target_hw = node.inputs[1]
+    target_hw_float = ctx.make_node("Cast", target_hw.output, attr={"to": onnx_pb.TensorProto.FLOAT})
+
+    scales_hw = ctx.make_node("Div", [target_hw_float.output[0], ori_shape_hw_float.output[0]])
+
+    const_one_array = ctx.make_const(utils.make_name("one"), np.array([1.0, 1.0]).astype(np.float32))
+    # scaler is nchw
+    scales = ctx.make_node("Concat", [const_one_array.output[0], scales_hw.output[0]], {"axis": 0})
+    input_nchw = ctx.make_node("Transpose", [node.input[0]], {"perm": [0, 3, 1, 2]})
+    upsample = ctx.make_node("Upsample", [input_nchw.output[0], scales.output[0]], attr={"mode": "nearest"})
+    res = ctx.make_node("Transpose", upsample.output, {"perm": [0, 2, 3, 1]},
+                        name=node.name, outputs=node.output)
+    return [ori_shape, ori_shape_hw, ori_shape_hw_float, target_hw_float, scales_hw,
+            const_one_array, scales, input_nchw, upsample, res]
 
 
 _custom_op_handlers={
             'Where': on_Where,
             'NonMaxSuppressionV3': on_NonMaxSuppressionV3,
             'Round': on_Round,
-            'StridedSlice': on_StridedSlice }
+            'StridedSlice': on_StridedSlice,
+            'ResizeBilinear': on_ResizeBilinear,
+            'ResizeNearestNeighbor': on_ResizeNearestNeighbor }
 
 
 def convert_model(yolo, name):
     yolo.load_model()
-    onnxmodel = convert_keras(yolo.final_model, channel_first_inputs=['input_1'],
+    onnxmodel = convert_keras(yolo.final_model, target_opset=9, channel_first_inputs=['input_1'],
                               debug_mode=True, custom_op_conversions=_custom_op_handlers)
     onnx.save_model(onnxmodel, name)
 

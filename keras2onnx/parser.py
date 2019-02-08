@@ -307,12 +307,23 @@ def _is_same_subgraph(node, predecessor, key, scope_name):
     return my_scope == scope_name or (isinstance(key, str) and my_key == key + '_')
 
 
-def _create_keras_nodelist(layer, node_list):
+def _create_keras_nodelist(layer, node_list, tf_layer_symbol):
     newly = set()
     ts_end = set()
     for node_ in extract_inbound_nodes(layer):
         newly |= set([ts_.op for ts_ in node_.output_tensors])
         ts_end |= set(node_.input_tensors)
+
+    # output_nodes = [get_node_by_name(node_list, GRAPH_OUTMOST_NAME + '/' + n_.name, exact_match=True) for n_ in newly]
+    output_nodes = []
+    for n_ in newly:
+        cur_node = get_node_by_name(node_list, GRAPH_OUTMOST_NAME + '/' + n_.name, exact_match=True)
+        if cur_node is not None:
+            output_nodes.append(cur_node)
+        else:
+            cur_node_2 = get_node_by_name(node_list, GRAPH_OUTMOST_NAME + '/' + tf_layer_symbol + n_.name, exact_match=True)
+            if cur_node_2 is not None:
+                output_nodes.append(cur_node_2)
 
     visited = set()
     while newly:
@@ -323,11 +334,38 @@ def _create_keras_nodelist(layer, node_list):
                 if i_ not in ts_end and i_.op not in visited:
                     newly.add(i_.op)
 
-    return [get_node_by_name(node_list, GRAPH_OUTMOST_NAME + '/' + n_.name, exact_match=True) for n_ in visited]
+    keras_nodes = []
+    for n_ in visited:
+        cur_node = get_node_by_name(node_list, GRAPH_OUTMOST_NAME + '/' + n_.name, exact_match=True)
+        if cur_node is not None:
+            keras_nodes.append(cur_node)
+        else:
+            cur_node_2 = get_node_by_name(node_list, GRAPH_OUTMOST_NAME + '/' + tf_layer_symbol + n_.name,
+                                          exact_match=True)
+            if cur_node_2 is not None:
+                keras_nodes.append(cur_node_2)
+
+    return keras_nodes, output_nodes
 
 
 def _parse_graph_scope(graph, keras_op_table, topology, top_scope, target_opset, output_names):
     node_list = graph.get_operations()
+
+    file_kot = open("keras_op_table.txt", "w")
+    for key, _ in keras_op_table.items():
+        file_kot.writelines(key+'\n')
+    file_kot.close()
+
+    file_tot = open("tf_op_table.txt", "w")
+    for k_n in node_list:
+        file_tot.write(k_n.name+'    ')
+        file_tot.write('inputs:  ')
+        for k_n_input in k_n.inputs:
+            file_tot.write(k_n_input.op.name + ', ')
+        file_tot.write('\n')
+
+    file_tot.close()
+
     input_nodes = []
     raw_model_container = topology.raw_model
 
@@ -381,19 +419,50 @@ def _parse_graph_scope(graph, keras_op_table, topology, top_scope, target_opset,
         # begin a new scope
         nodes = [node]
         visited.add(node)
+        '''
         type_k, curr_scope_name = \
             (keras_op_table[node.name], GRAPH_OUTMOST_NAME + '/' + keras_op_table[node.name].name) \
             if node.name in keras_op_table else _get_scope_name(node.name)
+            '''
+        tf_layer_symbol = ''
+        if node.name in keras_op_table:
+            type_k, curr_scope_name = \
+                (keras_op_table[node.name], GRAPH_OUTMOST_NAME + '/' + keras_op_table[node.name].name)
+        else:
+            set_value = 0
+            name_vector = node.name.split('/')
+            if len(name_vector) > 2:
+                temp_name = name_vector[0] + '/'
+                temp_name = temp_name + '/'.join(name_vector[2:])
+                tf_layer_symbol = name_vector[1] + '/'
+                if temp_name in keras_op_table:
+                    type_k, curr_scope_name = \
+                        (keras_op_table[temp_name], GRAPH_OUTMOST_NAME + '/' + keras_op_table[temp_name].name)
+                    set_value = 1
+            if set_value == 0:
+                type_k, curr_scope_name = \
+                    _get_scope_name(node.name)
+
         if type_k in keras_layer_visited:
             continue
 
+        if type_k is None:
+            a = 1
+
         activated_keras_nodes = set()
+        keras_output_nodes = []
         if isinstance(type_k, keras.layers.Layer):
-            activated_keras_nodes = _create_keras_nodelist(type_k, node_list)
+            activated_keras_nodes, keras_output_nodes = _create_keras_nodelist(type_k, node_list, tf_layer_symbol)
         q_subgraph = queue.Queue()
         i_subgraph = set()
         bound_nodes = []
         advance_by_input(node, type_k, activated_keras_nodes, curr_scope_name, q_overall, q_subgraph, i_subgraph, bound_nodes)
+        for ot_ in keras_output_nodes:
+            if ot_ not in nodes:
+                advance_by_input(ot_, type_k, activated_keras_nodes, curr_scope_name, q_overall, q_subgraph, i_subgraph,
+                                 bound_nodes)
+                visited.add(ot_)
+                nodes.append(ot_)
 
         scope_processed = False
         while not scope_processed:
