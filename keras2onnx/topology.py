@@ -261,6 +261,38 @@ def convert_topology(topology, model_name, doc_string, target_opset, channel_fir
         keras2onnx_logger().warning('{} so the convertor optimizer is not enabled.'.format(onnx_not_imported))
         nodes = container.nodes
 
+    file_tot = open("tf_nodes.txt", "w")
+    for node in nodes:
+        file_tot.write(node.name+'    ')
+        file_tot.write('inputs:  ')
+        for k_n_input in node.input:
+            file_tot.write(k_n_input + ', ')
+        file_tot.write('outputs:  ')
+        for k_n_output in node.output:
+            file_tot.write(k_n_output + ', ')
+        file_tot.write('\n')
+    file_tot.close()
+
+    file_tot = open("container_inputs.txt", "w")
+    for node in container.inputs:
+        file_tot.writelines(node.name + '\n')
+    file_tot.close()
+
+    file_tot = open("extra_inputs.txt", "w")
+    for node in extra_inputs:
+        file_tot.writelines(node.name + '\n')
+    file_tot.close()
+
+    file_tot = open("container_outputs.txt", "w")
+    for node in container.outputs:
+        file_tot.writelines(node.name + '\n')
+    file_tot.close()
+
+    file_tot = open("initializers.txt", "w")
+    for node in container.initializers:
+        file_tot.writelines(node.name + '\n')
+    file_tot.close()
+
     # Create a graph from its main components
     graph = helper.make_graph(nodes, model_name, container.inputs + extra_inputs,
                               container.outputs, container.initializers)

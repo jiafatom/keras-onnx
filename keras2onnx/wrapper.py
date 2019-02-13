@@ -48,6 +48,9 @@ def tfnode_convert(varset, operator, container):
         onnx_op.output[:] = op_outputs
         container.add_onnx_node(onnx_op, op_version=container.target_opset)
 
+    for input in all_inputs:
+        if input == 'one__2455':
+            a = 1
     # create input_tensor_values, initializers
     # if initilizer is not used as input by any node, then it will be ignored
     initializers = [i for i in list(g.initializers.values()) if i.name in all_inputs]
