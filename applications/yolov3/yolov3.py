@@ -435,12 +435,12 @@ def on_ResizeNearestNeighbor(ctx, node, name, args):
 
 
 _custom_op_handlers={
-            'Where': on_Where,
-            'NonMaxSuppressionV3': on_NonMaxSuppressionV3,
-            'Round': on_Round,
-            'StridedSlice': on_StridedSlice,
-            'ResizeBilinear': on_ResizeBilinear,
-            'ResizeNearestNeighbor': on_ResizeNearestNeighbor }
+            'Where': (on_Where, []),
+            'NonMaxSuppressionV3': (on_NonMaxSuppressionV3, []),
+            'Round': (on_Round, []),
+            'StridedSlice': (on_StridedSlice, []),
+            'ResizeBilinear': (on_ResizeBilinear, []),
+            'ResizeNearestNeighbor': (on_ResizeNearestNeighbor, []) }
 
 
 def convert_model(yolo, name):

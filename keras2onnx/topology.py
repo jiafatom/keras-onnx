@@ -250,6 +250,7 @@ def convert_topology(topology, model_name, doc_string, target_opset, channel_fir
 
 
     # enable the ONNX optimizations
+
     try:
         import onnxtk
         nodes = onnxtk.optimizer.optimize_onnx(container.nodes, nchw_inputs=nchw_inputs, inputs=container.inputs + extra_inputs,
@@ -261,9 +262,11 @@ def convert_topology(topology, model_name, doc_string, target_opset, channel_fir
         keras2onnx_logger().warning('{} so the convertor optimizer is not enabled.'.format(onnx_not_imported))
         nodes = container.nodes
 
+    #nodes = container.nodes
     file_tot = open("tf_nodes.txt", "w")
     for node in nodes:
         file_tot.write(node.name+'    ')
+        file_tot.write('type: ' + node.op_type + '   ')
         file_tot.write('inputs:  ')
         for k_n_input in node.input:
             file_tot.write(k_n_input + ', ')
