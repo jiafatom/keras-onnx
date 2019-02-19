@@ -262,6 +262,10 @@ def convert_topology(topology, model_name, doc_string, target_opset, channel_fir
         keras2onnx_logger().warning('{} so the convertor optimizer is not enabled.'.format(onnx_not_imported))
         nodes = container.nodes
 
+    for node in nodes:
+        if node.name == "yolo_evaluation_layer_1_imp_root__yolo_evaluation_layer_1_Reshape_15_shape_Concat__320":
+            a = 1
+
     #nodes = container.nodes
     file_tot = open("tf_nodes.txt", "w")
     for node in nodes:

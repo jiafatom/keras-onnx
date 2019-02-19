@@ -13,7 +13,7 @@ from PIL import Image, ImageFont, ImageDraw
 from keras import backend as K
 from keras.layers import Input
 from keras.models import load_model
-from keras2onnx import convert_keras
+from keras2onnx import convert_keras, set_converter, cvtfunc
 
 import yolo3
 from yolo3.model import yolo_eval, yolo_body, tiny_yolo_body, yolo_boxes_and_scores
@@ -170,6 +170,7 @@ class YOLO(object):
         is_tiny_version = num_anchors == 6  # default setting
 
         last_dim = num_anchors / 3 * (num_classes + 5)
+
         self.i0 = K.placeholder(shape=(None, None, None, last_dim))
         self.i1 = K.placeholder(shape=(None, None, None, last_dim))
         self.i2 = K.placeholder(shape=(None, None, None, last_dim))
@@ -294,6 +295,10 @@ def on_Round(ctx, node, name, args):
     node.type = "Ceil"
     return node
 
+def on_GreaterEqual(ctx, node, name, args):
+    # should be used by Greater, Equal, Or
+    node.type = "Greater"
+    return node
 
 def on_StridedSlice(ctx, node, name, args):
     # node.type = "Reverse"
@@ -307,6 +312,8 @@ def on_StridedSlice(ctx, node, name, args):
     begin = node.inputs[1].get_tensor_value()
     end = node.inputs[2].get_tensor_value()
     strides = node.inputs[3].get_tensor_value()
+    begin_mask = node.get_attr("begin_mask")
+    begin_mask = begin_mask.i if begin_mask is not None else 0
     end_mask = node.get_attr("end_mask")
     end_mask = end_mask.i if end_mask is not None else 0
     ellipsis_mask = node.get_attr("ellipsis_mask")
@@ -340,12 +347,18 @@ def on_StridedSlice(ctx, node, name, args):
             needs_squeeze.append(idx)
             continue
 
-        new_begin.append(begin_item)
-        mask = (end_mask >> idx) & 1
-        if mask != 0:
-            new_end.append(sys.maxsize)
-        else:
+        if (begin_mask >> idx) & 1 != 0:
+            new_begin.append(0)
             new_end.append(end_item)
+            continue
+
+        if (end_mask >> idx) & 1 != 0:
+            new_begin.append(begin_item)
+            new_end.append(sys.maxsize)
+            continue
+
+        new_begin.append(begin_item)
+        new_end.append(end_item)
 
     node.set_attr("starts", new_begin)
     node.set_attr("ends", new_end)
@@ -355,6 +368,7 @@ def on_StridedSlice(ctx, node, name, args):
     ctx.remove_input(node, node.input[2])
     ctx.remove_input(node, node.input[1])
     nodes = [node]
+
     if needs_squeeze:
         name = utils.make_name(node.name)
         squeeze_node = ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
@@ -365,6 +379,7 @@ def on_StridedSlice(ctx, node, name, args):
         ctx.copy_shape(node.output[0], squeeze_node.output[0])
 
     # onnx slice as of opset 7 does only take float tensors ... cast if needed
+    '''
     input_dtype = ctx.get_dtype(node.input[0])
     if input_dtype != onnx_pb.TensorProto.FLOAT:
         if node.inputs[0].type == "Cast":
@@ -383,6 +398,7 @@ def on_StridedSlice(ctx, node, name, args):
         ctx.set_dtype(cast_node.output[0], input_dtype)
         ctx.copy_shape(node.output[0], cast_node.output[0])
         nodes.append(cast_node)
+    '''
     return nodes
 
 
@@ -433,19 +449,35 @@ def on_ResizeNearestNeighbor(ctx, node, name, args):
     return [ori_shape, ori_shape_hw, ori_shape_hw_float, target_hw_float, scales_hw,
             const_one_array, scales, input_nchw, upsample, res]
 
-
 _custom_op_handlers={
             'Where': (on_Where, []),
             'NonMaxSuppressionV3': (on_NonMaxSuppressionV3, []),
             'Round': (on_Round, []),
             'StridedSlice': (on_StridedSlice, []),
             'ResizeBilinear': (on_ResizeBilinear, []),
-            'ResizeNearestNeighbor': (on_ResizeNearestNeighbor, []) }
+            'ResizeNearestNeighbor': (on_ResizeNearestNeighbor, []),
+            'GreaterEqual': (on_GreaterEqual, [])
+}
+'''
+_custom_op_handlers={
+            'Where': on_Where,
+            'NonMaxSuppressionV3': on_NonMaxSuppressionV3,
+            'Round': on_Round,
+            'StridedSlice': on_StridedSlice,
+            'ResizeBilinear': on_ResizeBilinear,
+            'ResizeNearestNeighbor': on_ResizeNearestNeighbor }
+'''
 
+@cvtfunc(pattern=r'(^.*/boolean_mask_\d+/)')
+def boolean_mask_convert(scope, operator, container):
+    container.add_node('BooleanMask', operator.input_full_names, operator.output_full_names, op_domain='Microsoft', op_version=operator.target_opset)
 
 def convert_model(yolo, name):
     yolo.load_model()
-    onnxmodel = convert_keras(yolo.final_model, target_opset=9, channel_first_inputs=['input_1'],
+    target_opset_number = 9
+    if target_opset_number >= 9:
+        set_converter('BooleanMask', boolean_mask_convert)
+    onnxmodel = convert_keras(yolo.final_model, target_opset=target_opset_number, channel_first_inputs=['input_1'],
                               debug_mode=True, custom_op_conversions=_custom_op_handlers)
     onnx.save_model(onnxmodel, name)
 
@@ -458,4 +490,5 @@ if __name__ == '__main__':
     if '-c' in sys.argv:
         convert_model(YOLO(), 'model_data/yolov3.onnx')
     else:
+        input("Press Enter to continue...")
         detect_img(YOLO(), sys.argv[1])

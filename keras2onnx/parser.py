@@ -55,8 +55,11 @@ _SCOPE_TO_CONVERTER = {}
 
 
 def _get_predefined_scope(node_name):
+    print(node_name)
     for scope_re, val in six.iteritems(_SCOPE_TO_CONVERTER):
         match = scope_re.match(node_name)
+        print(scope_re)
+        print(match)
         if match:
             return val[fb_key], match.group(1)
         else:  # try the other scope pattern as well
@@ -342,6 +345,11 @@ def _create_keras_nodelist(layer, node_list):
 
 def _parse_graph_scope(graph, keras_op_table, topology, top_scope, target_opset, output_names):
     node_list = graph.get_operations()
+
+
+    for node in node_list:
+        if (node.name == "imp_root_/yolo_evaluation_layer_1/ones_like_79"):
+            a = 1
 
     file_kot = open("keras_op_table.txt", "w")
     for key, _ in keras_op_table.items():

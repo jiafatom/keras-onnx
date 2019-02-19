@@ -10,6 +10,7 @@ import keras2onnx
 from keras.applications.resnet50 import preprocess_input
 from keras.preprocessing import image
 from distutils.version import StrictVersion
+import tf2onnx
 
 
 working_path = os.path.abspath(os.path.dirname(__file__))
@@ -661,5 +662,187 @@ class TestKerasTF2ONNX(unittest.TestCase):
         model = mobilenet_v2.MobileNetV2(weights='imagenet')
         self._test_keras_model(model)
 
+    def on_Round(self, ctx, node, name, args):
+        node.type = "Ceil"
+        return node
+
+    def on_StridedSlice(self, ctx, node, name, args):
+        # node.type = "Reverse"
+        # for now we implement common cases. Things like strides!=1 are not mappable to onnx.
+        not_supported_attr = ["new_axis_mask"]
+        for attr_name in not_supported_attr:
+            attr = node.get_attr(attr_name)
+            if attr is not None and attr.i != 0:
+                raise ValueError("StridedSlice: attribute " + attr_name + " not supported")
+        input_shape = ctx.get_shape(node.input[0])
+        begin = node.inputs[1].get_tensor_value()
+        end = node.inputs[2].get_tensor_value()
+        strides = node.inputs[3].get_tensor_value()
+        end_mask = node.get_attr("end_mask")
+        end_mask = end_mask.i if end_mask is not None else 0
+        ellipsis_mask = node.get_attr("ellipsis_mask")
+        ellipsis_mask = ellipsis_mask.i if ellipsis_mask is not None else 0
+        shrink_axis_mask = node.get_attr("shrink_axis_mask")
+        shrink_axis_mask = shrink_axis_mask.i if shrink_axis_mask is not None else 0
+        new_begin = []
+        new_end = []
+        axes = []
+        # onnx slice op can't remove a axis, track axis and add a squeeze op if needed
+        needs_squeeze = []
+        import sys
+        for idx, begin_item in enumerate(begin):
+            end_item = end[idx]
+            # if strides[idx] != 1:
+            # raise ValueError("StridedSlice: only strides=1 is supported, current stride =" + str(strides[idx]))
+            axes.append(idx)
+
+            if (ellipsis_mask >> idx) & 1:
+                new_begin.append(0)
+                new_end.append(sys.maxsize)
+                continue
+
+            # an implicit condition is stride == 1 (checked in above)
+            if begin_item < 0 and end_item == 0:
+                end_item = sys.maxsize
+
+            mask = (shrink_axis_mask >> idx) & 1
+            if mask != 0:
+                new_begin.append(begin_item)
+                new_end.append(end_item)
+                needs_squeeze.append(idx)
+                continue
+
+            new_begin.append(begin_item)
+            mask = (end_mask >> idx) & 1
+            if mask != 0:
+                new_end.append(sys.maxsize)
+            else:
+                new_end.append(end_item)
+
+        node.set_attr("starts", new_begin)
+        node.set_attr("ends", new_end)
+        node.set_attr("axes", axes)
+        node.type = "Slice"
+        ctx.remove_input(node, node.input[3])
+        ctx.remove_input(node, node.input[2])
+        ctx.remove_input(node, node.input[1])
+        nodes = [node]
+        from onnx import onnx_pb
+        from tf2onnx import utils
+        if needs_squeeze:
+            name = utils.make_name(node.name)
+            squeeze_node = ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
+            squeeze_node.set_attr("axes", needs_squeeze)
+            nodes.append(squeeze_node)
+            input_dtype = ctx.get_dtype(node.output[0])
+            ctx.set_dtype(squeeze_node.output[0], input_dtype)
+            ctx.copy_shape(node.output[0], squeeze_node.output[0])
+
+        # onnx slice as of opset 7 does only take float tensors ... cast if needed
+        input_dtype = ctx.get_dtype(node.input[0])
+        if input_dtype != onnx_pb.TensorProto.FLOAT:
+            if node.inputs[0].type == "Cast":
+                # override the previous cast
+                cast_node = node.inputs[0]
+            else:
+                cast_node = ctx.insert_new_node_on_input(node, "Cast", node.input[0])
+                nodes.insert(0, cast_node)
+            cast_node.set_attr("to", onnx_pb.TensorProto.FLOAT)
+            ctx.set_dtype(cast_node.output[0], onnx_pb.TensorProto.FLOAT)
+            ctx.copy_shape(node.input[0], cast_node.output[0])
+            # undo the cast afer slice
+            name = utils.make_name(node.name)
+            cast_node = ctx.insert_new_node_on_output("Cast", nodes[-1].output[0], name)
+            cast_node.set_attr("to", input_dtype)
+            ctx.set_dtype(cast_node.output[0], input_dtype)
+            ctx.copy_shape(node.output[0], cast_node.output[0])
+            nodes.append(cast_node)
+        return nodes
+
+    def test_Concat(self):
+        from keras import backend as K
+        import tensorflow as tf
+        from PIL import Image, ImageFont, ImageDraw
+        image = Image.open('elephant.jpg')
+        A, B, C, D, E = image.size[0], image.size[1], 10, 3, 2
+
+        with tf.Session() as sess:
+            box_xy = tf.placeholder(tf.float32, shape=(A, B, C, D, E))
+            box_wh = tf.placeholder(tf.float32, shape=(A, B, C, D, E))
+            input_shape = tf.placeholder(tf.float32, shape=(2,))
+            image_shape = tf.placeholder(tf.float32, shape=(2,))
+            box_yx = box_xy[..., ::-1]
+            box_hw = box_wh[..., ::-1]
+            input_shape = tf.cast(input_shape, K.dtype(box_yx))
+            image_shape = tf.cast(image_shape, K.dtype(box_yx))
+            new_shape = tf.round(image_shape * K.min(input_shape / image_shape))
+            offset = (input_shape - new_shape) / 2. / input_shape
+            scale = input_shape / new_shape
+            box_yx = (box_yx - offset) * scale
+            box_hw *= scale
+
+            box_mins = box_yx - (box_hw / 2.)
+            box_maxes = box_yx + (box_hw / 2.)
+            tensor = [
+                box_mins[..., 0:1],  # y_min
+                box_mins[..., 1:2],  # x_min
+                box_maxes[..., 0:1],  # y_max
+                box_maxes[..., 1:2]  # x_max
+            ]
+            boxes = tf.concat(tensor, axis=-1)
+            boxes *= tf.concat([image_shape, image_shape], axis=-1)
+            boxes = K.reshape(boxes, [-1, 4])
+            _ = tf.identity(boxes, name="output")
+            onnx_graph = tf2onnx.tfonnx.process_tf_graph(sess.graph, output_names=["output:0"], custom_op_handlers={'StridedSlice': (self.on_StridedSlice, []), 'Round': (self.on_Round, [])})
+            model_proto = onnx_graph.make_model("test")
+            with open("model.onnx", "wb") as f:
+                f.write(model_proto.SerializeToString())
+
+    def test_Concat2(self):
+        from keras import backend as K
+        import tensorflow as tf
+        from PIL import Image, ImageFont, ImageDraw
+        image = Image.open('elephant.jpg')
+        A, B, C, D, E = image.size[0], image.size[1], 10, 3, 2
+
+        with tf.Session() as sess:
+            feats = tf.placeholder(tf.float32, shape=(A, B, C, 255))
+            anchors = np.array([[116, 90], [156, 198], [373, 326]])
+            num_anchors = len(anchors)
+            # Reshape to batch, height, width, num_anchors, box_params.
+            anchors_tensor = K.reshape(K.constant(anchors), [1, 1, 1, num_anchors, 2])
+
+            grid_shape = np.array([image.size[0], image.size[1]]) # K.shape(feats)[1:3]  # height, width
+            grid_y = K.tile(K.reshape(K.arange(0, stop=grid_shape[0]), [-1, 1, 1, 1]),
+                            [1, grid_shape[1], 1, 1])
+            grid_x = K.tile(K.reshape(K.arange(0, stop=grid_shape[1]), [1, -1, 1, 1]),
+                            [grid_shape[0], 1, 1, 1])
+            grid = K.concatenate([grid_x, grid_y])
+            grid = K.cast(grid, K.dtype(feats))
+            _ = tf.identity(grid, name="output")
+            onnx_graph = tf2onnx.tfonnx.process_tf_graph(sess.graph, output_names=["output:0"],
+                                                         custom_op_handlers={'StridedSlice': (self.on_StridedSlice, []),
+                                                                             'Round': (self.on_Round, [])})
+            model_proto = onnx_graph.make_model("test")
+            with open("model.onnx", "wb") as f:
+                f.write(model_proto.SerializeToString())
+
+    def test_dump(self):
+        from onnx.onnx_pb import ModelProto
+        m = ModelProto()
+        s = None
+        import json
+        from google.protobuf.json_format import MessageToJson
+
+
+        with open("yolov3.onnx", "rb") as f:
+            m.ParseFromString(f.read())
+            with open("new.json", 'w') as jsfile:
+                actual_json_text = MessageToJson(m)
+                jsfile.write(actual_json_text)
+
+
+
 if __name__ == "__main__":
     unittest.main()
+
