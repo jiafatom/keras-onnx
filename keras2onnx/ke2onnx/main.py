@@ -9,10 +9,12 @@ from keras.layers import advanced_activations as adv_activations
 
 from ..common import with_variable
 from ..common.onnx_ops import apply_identity, apply_reshape
+from ..common.utils import GRAPH_OUTMOST_NAME
 
 from .activation import convert_keras_activation
 from .adv_activation import convert_keras_advanced_activation
 from .batch_norm import convert_keras_batch_normalization
+from .dense import convert_keras_dense
 from .upsample import *
 from .conv import *
 from .pooling import *
@@ -69,6 +71,8 @@ keras_layer_to_operator = {
     SeparableConv1D: convert_keras_separable_conv1d,
     SeparableConv2D: convert_keras_separable_conv2d,
 
+    Dense: convert_keras_dense,
+
     MaxPooling1D: convert_keras_max_pooling_1d,
     MaxPooling2D: convert_keras_max_pooling_2d,
     MaxPooling3D: convert_keras_max_pooling_3d,
@@ -90,6 +94,40 @@ keras_layer_to_operator = {
     Bidirectional: convert_bidirectional
 }
 
+'''
+def build_opdict_from_keras(model):
+    # type: (keras.Model) -> []
+
+    output_dict = {}
+    for l_ in model.layers:
+        if hasattr(l_, 'layers'):
+            dict = build_opdict_from_keras(l_)
+            output_dict.update(dict)
+            continue
+
+        if type(l_) in keras_layer_to_operator:
+            for node_ in extract_inbound_nodes(l_):
+                for ts_ in node_.output_tensors:
+                    output_dict[GRAPH_OUTMOST_NAME + '/' + ts_.op.name] = l_
+
+    return output_dict
+'''
+
+def build_opdict_from_keras(model):
+    # type: (keras.Model) -> []
+
+    output_dict = {}
+    for l_ in model.layers:
+        if hasattr(l_, 'layers'):
+            dict = build_opdict_from_keras(l_)
+            output_dict.update(dict)
+            continue
+
+        for node_ in extract_inbound_nodes(l_):
+            for ts_ in node_.output_tensors:
+                output_dict[GRAPH_OUTMOST_NAME + '/' + ts_.op.name] = l_
+
+    return output_dict
 
 @with_variable('loaded')
 def static_set_ke2onnx_converters(func_set_converter):

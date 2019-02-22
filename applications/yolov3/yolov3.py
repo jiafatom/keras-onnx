@@ -470,7 +470,7 @@ _custom_op_handlers={
 
 @cvtfunc(pattern=r'(^.*/boolean_mask_\d+/)')
 def boolean_mask_convert(scope, operator, container):
-    container.add_node('BooleanMask', operator.input_full_names, operator.output_full_names, op_domain='Microsoft', op_version=operator.target_opset)
+    container.add_node('BooleanMask', operator.input_full_names, operator.output_full_names, op_domain='com.microsoft', op_version=operator.target_opset)
 
 def convert_model(yolo, name):
     yolo.load_model()

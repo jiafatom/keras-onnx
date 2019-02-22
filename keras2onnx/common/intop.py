@@ -69,6 +69,8 @@ class Operator:
         self.inputs.append(var)
 
     def add_output(self, var):
+        if var.op_from:
+            print(var.op_from)
         assert var.op_from is None
         var.op_from = self
         self.outputs.append(var)

@@ -511,9 +511,9 @@ class TestKerasTF2ONNX(unittest.TestCase):
         input_dim = 7
         sequence_len = 3
         inputs1 = keras.Input(shape=(sequence_len, input_dim))
-        cls = keras.layers.LSTM(units=5, return_state=True, return_sequences=True)
+        cls = keras.layers.LSTM(units=5, return_state=False, return_sequences=True)
         lstm1 = cls(inputs1)
-        output = keras.layers.Reshape((sequence_len, 5))(lstm1[0])
+        output = keras.layers.Reshape((sequence_len, 5))(lstm1)
         model = keras.Model(inputs=inputs1, outputs=output)
         model.compile(optimizer='sgd', loss='mse')
 
@@ -645,6 +645,7 @@ class TestKerasTF2ONNX(unittest.TestCase):
 
             preds = model.predict(x)
             onnx_model = keras2onnx.convert_keras(model, model.name)
+            onnx.save_model(onnx_model, 'temp_old.onnx')
             self.assertTrue(self.run_onnx_runtime(model_name, onnx_model, x, preds, rtol=rtol, atol=atol))
         except FileNotFoundError:
             self.assertTrue(False, 'The image data does not exist.')
@@ -652,7 +653,6 @@ class TestKerasTF2ONNX(unittest.TestCase):
     def test_MobileNet(self):
         from keras.applications import mobilenet
         model = mobilenet.MobileNet(weights='imagenet')
-        model.save('mobile.h5')
         self._test_keras_model(model)
 
     @unittest.skipIf(StrictVersion(keras.__version__) < StrictVersion("2.2.3"),
@@ -660,6 +660,7 @@ class TestKerasTF2ONNX(unittest.TestCase):
     def test_MobileNetV2(self):
         from keras.applications import mobilenet_v2
         model = mobilenet_v2.MobileNetV2(weights='imagenet')
+        model.save('mobile.h5')
         self._test_keras_model(model)
 
     def on_Round(self, ctx, node, name, args):
