@@ -22,10 +22,10 @@ from yolo3.utils import letterbox_image
 from onnx import onnx_pb
 from tf2onnx import utils
 
-class YOLOEvaluationLayer(keras.layers.Layer):
+class YOLOBoxesAndScoresLayer(keras.layers.Layer):
 
     def __init__(self, **kwargs):
-        super(YOLOEvaluationLayer, self).__init__()
+        super(YOLOBoxesAndScoresLayer, self).__init__()
         self.max_boxes = kwargs.get('max_boxes', 20)
         self.score_threshold = kwargs.get('score_threshold', .6)
         self.iou_threshold = kwargs.get('iou_threshold', .5)
@@ -64,6 +64,54 @@ class YOLOEvaluationLayer(keras.layers.Layer):
 
         mask = box_scores >= self.score_threshold
         max_boxes_tensor = K.constant(self.max_boxes, dtype='int32')
+        '''
+        boxes_ = []
+        scores_ = []
+        classes_ = []
+        for c in range(self.num_classes):
+            class_boxes = tf.boolean_mask(boxes, mask[:, c])
+            class_box_scores = tf.boolean_mask(box_scores[:, c], mask[:, c])
+            nms_index = tf.image.non_max_suppression(
+                class_boxes, class_box_scores, max_boxes_tensor, iou_threshold=self.iou_threshold)
+            class_boxes = K.gather(class_boxes, nms_index)
+            class_box_scores = K.gather(class_box_scores, nms_index)
+            classes = K.ones_like(class_box_scores, 'int32') * c
+            boxes_.append(class_boxes)
+            scores_.append(class_box_scores)
+            classes_.append(classes)
+        boxes_ = K.concatenate(boxes_, axis=0)
+        scores_ = K.concatenate(scores_, axis=0)
+        classes_ = K.concatenate(classes_, axis=0)
+
+        return [boxes_, scores_, classes_]
+        '''
+        return [boxes, box_scores, mask, max_boxes_tensor]
+
+    def compute_output_shape(self, input_shape):
+        assert isinstance(input_shape, list)
+        return [(None, 4), (None, self.num_classes), (None, self.num_classes), (None,)]
+
+
+class YOLOEvaluationLayer(keras.layers.Layer):
+
+    def __init__(self, **kwargs):
+        super(YOLOEvaluationLayer, self).__init__()
+        self.iou_threshold = kwargs.get('iou_threshold', .5)
+        self.num_classes = kwargs.get('num_classes')
+
+    def get_config(self):
+        config = {
+            "iou_threshold": self.iou_threshold,
+            "num_classes": self.num_classes,
+        }
+
+        return config
+
+    def call(self, inputs, **kwargs):
+        boxes = inputs[0]
+        box_scores = inputs[1]
+        mask = inputs[2]
+        max_boxes_tensor = inputs[3]
         boxes_ = []
         scores_ = []
         classes_ = []
@@ -87,7 +135,6 @@ class YOLOEvaluationLayer(keras.layers.Layer):
     def compute_output_shape(self, input_shape):
         assert isinstance(input_shape, list)
         return [(None, 4), (None,), (None,)]
-
 
 class YOLO(object):
     def __init__(self):
@@ -155,11 +202,18 @@ class YOLO(object):
         #image_input = keras.Input((None, None, 3), dtype='float32')
         image_input = keras.Input((224, 224, 3), dtype='float32')
         y1, y2, y3 = self.yolo_model(image_input)
-        out_boxes, out_scores, out_classes = \
-            YOLOEvaluationLayer(anchors=self.anchors, num_classes=len(self.class_names))(
+        boxes, box_scores, mask, max_boxes_tensor = \
+            YOLOBoxesAndScoresLayer(anchors=self.anchors, num_classes=len(self.class_names))(
                 inputs=[y1, y2, y3])
         self.final_model = keras.Model(inputs=[image_input],
+                                       outputs=[boxes, box_scores, mask, max_boxes_tensor])
+        '''
+        out_boxes, out_scores, out_classes = \
+            YOLOEvaluationLayer(num_classes=len(self.class_names))(inputs=[boxes, box_scores, mask, max_boxes_tensor])
+            
+        self.final_model = keras.Model(inputs=[image_input],
                                        outputs=[out_boxes, out_scores, out_classes])
+        '''
         self.final_model.save('model_data/merged_keras.h5')
         print('{} model, anchors, and classes loaded.'.format(model_path))
 
@@ -217,7 +271,8 @@ class YOLO(object):
                                  'conv2d_67_BiasAdd_01',
                                  'conv2d_75_BiasAdd_01'])
 
-        out_boxes, out_scores, out_classes = self.sess.run(
+        boxes, box_scores, mask, max_boxes_tensor = self.sess.run(
+        # out_boxes, out_scores, out_classes = self.sess.run(
             [self.boxes, self.scores, self.classes],
             feed_dict={
                 self.i0: r[0],
@@ -226,7 +281,7 @@ class YOLO(object):
                 self.input_image_shape: [image.size[1], image.size[0]],
                 K.learning_phase(): 0
             })
-
+        '''
         print('Found {} boxes for {}'.format(len(out_boxes), 'img'))
 
         font = ImageFont.truetype(font='font/FiraMono-Medium.otf',
@@ -268,7 +323,7 @@ class YOLO(object):
         end = timer()
         print("time=", end - start)
         return image
-
+        '''
 
 def detect_img(yolo, name):
     import onnxruntime
@@ -312,6 +367,7 @@ def on_StridedSlice(ctx, node, name, args):
     begin = node.inputs[1].get_tensor_value()
     end = node.inputs[2].get_tensor_value()
     strides = node.inputs[3].get_tensor_value()
+    max_size = sys.maxsize
     begin_mask = node.get_attr("begin_mask")
     begin_mask = begin_mask.i if begin_mask is not None else 0
     end_mask = node.get_attr("end_mask")
@@ -333,12 +389,12 @@ def on_StridedSlice(ctx, node, name, args):
 
         if (ellipsis_mask >> idx) & 1:
             new_begin.append(0)
-            new_end.append(sys.maxsize)
+            new_end.append(max_size)
             continue
 
         # an implicit condition is stride == 1 (checked in above)
         if begin_item < 0 and end_item == 0:
-            end_item = sys.maxsize
+            end_item = max_size
 
         mask = (shrink_axis_mask >> idx) & 1
         if mask != 0:
@@ -354,7 +410,7 @@ def on_StridedSlice(ctx, node, name, args):
 
         if (end_mask >> idx) & 1 != 0:
             new_begin.append(begin_item)
-            new_end.append(sys.maxsize)
+            new_end.append(max_size)
             continue
 
         new_begin.append(begin_item)
@@ -455,7 +511,7 @@ _custom_op_handlers={
             'Round': (on_Round, []),
             'StridedSlice': (on_StridedSlice, []),
             'ResizeBilinear': (on_ResizeBilinear, []),
-            'ResizeNearestNeighbor': (on_ResizeNearestNeighbor, []),
+            # 'ResizeNearestNeighbor': (on_ResizeNearestNeighbor, []),
             'GreaterEqual': (on_GreaterEqual, [])
 }
 '''
