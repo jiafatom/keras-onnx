@@ -22,10 +22,10 @@ from yolo3.utils import letterbox_image
 from onnx import onnx_pb
 from tf2onnx import utils
 
-class YOLOBoxesAndScoresLayer(keras.layers.Layer):
+class YOLOEvaluationLayer(keras.layers.Layer):
 
     def __init__(self, **kwargs):
-        super(YOLOBoxesAndScoresLayer, self).__init__()
+        super(YOLOEvaluationLayer, self).__init__()
         self.max_boxes = kwargs.get('max_boxes', 20)
         self.score_threshold = kwargs.get('score_threshold', .6)
         self.iou_threshold = kwargs.get('iou_threshold', .5)
@@ -47,7 +47,7 @@ class YOLOBoxesAndScoresLayer(keras.layers.Layer):
         """Evaluate YOLO model on given input and return filtered boxes."""
         # yolo_outputs, input_image_shape = (inputs[0:3], inputs[3])
         yolo_outputs = inputs[0:3]
-        input_image_shape = K.constant([224, 224])
+        input_image_shape = K.constant([224, 224], dtype='int32')
         num_layers = len(yolo_outputs)
         anchor_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]] if num_layers == 3 else [[3, 4, 5],
                                                                                  [1, 2, 3]]  # default setting
@@ -64,7 +64,7 @@ class YOLOBoxesAndScoresLayer(keras.layers.Layer):
 
         mask = box_scores >= self.score_threshold
         max_boxes_tensor = K.constant(self.max_boxes, dtype='int32')
-        '''
+
         boxes_ = []
         scores_ = []
         classes_ = []
@@ -75,54 +75,7 @@ class YOLOBoxesAndScoresLayer(keras.layers.Layer):
                 class_boxes, class_box_scores, max_boxes_tensor, iou_threshold=self.iou_threshold)
             class_boxes = K.gather(class_boxes, nms_index)
             class_box_scores = K.gather(class_box_scores, nms_index)
-            classes = K.ones_like(class_box_scores, 'int32') * c
-            boxes_.append(class_boxes)
-            scores_.append(class_box_scores)
-            classes_.append(classes)
-        boxes_ = K.concatenate(boxes_, axis=0)
-        scores_ = K.concatenate(scores_, axis=0)
-        classes_ = K.concatenate(classes_, axis=0)
-
-        return [boxes_, scores_, classes_]
-        '''
-        return [boxes, box_scores, mask, max_boxes_tensor]
-
-    def compute_output_shape(self, input_shape):
-        assert isinstance(input_shape, list)
-        return [(None, 4), (None, self.num_classes), (None, self.num_classes), (None,)]
-
-
-class YOLOEvaluationLayer(keras.layers.Layer):
-
-    def __init__(self, **kwargs):
-        super(YOLOEvaluationLayer, self).__init__()
-        self.iou_threshold = kwargs.get('iou_threshold', .5)
-        self.num_classes = kwargs.get('num_classes')
-
-    def get_config(self):
-        config = {
-            "iou_threshold": self.iou_threshold,
-            "num_classes": self.num_classes,
-        }
-
-        return config
-
-    def call(self, inputs, **kwargs):
-        boxes = inputs[0]
-        box_scores = inputs[1]
-        mask = inputs[2]
-        max_boxes_tensor = inputs[3]
-        boxes_ = []
-        scores_ = []
-        classes_ = []
-        for c in range(self.num_classes):
-            class_boxes = tf.boolean_mask(boxes, mask[:, c])
-            class_box_scores = tf.boolean_mask(box_scores[:, c], mask[:, c])
-            nms_index = tf.image.non_max_suppression(
-                class_boxes, class_box_scores, max_boxes_tensor, iou_threshold=self.iou_threshold)
-            class_boxes = K.gather(class_boxes, nms_index)
-            class_box_scores = K.gather(class_box_scores, nms_index)
-            classes = K.ones_like(class_box_scores, 'int32') * c
+            classes = K.ones_like(class_box_scores, 'int32') * K.constant(value=c, dtype='int32')
             boxes_.append(class_boxes)
             scores_.append(class_box_scores)
             classes_.append(classes)
@@ -135,6 +88,7 @@ class YOLOEvaluationLayer(keras.layers.Layer):
     def compute_output_shape(self, input_shape):
         assert isinstance(input_shape, list)
         return [(None, 4), (None,), (None,)]
+
 
 class YOLO(object):
     def __init__(self):
@@ -202,18 +156,13 @@ class YOLO(object):
         #image_input = keras.Input((None, None, 3), dtype='float32')
         image_input = keras.Input((224, 224, 3), dtype='float32')
         y1, y2, y3 = self.yolo_model(image_input)
-        boxes, box_scores, mask, max_boxes_tensor = \
-            YOLOBoxesAndScoresLayer(anchors=self.anchors, num_classes=len(self.class_names))(
-                inputs=[y1, y2, y3])
-        self.final_model = keras.Model(inputs=[image_input],
-                                       outputs=[boxes, box_scores, mask, max_boxes_tensor])
-        '''
         out_boxes, out_scores, out_classes = \
-            YOLOEvaluationLayer(num_classes=len(self.class_names))(inputs=[boxes, box_scores, mask, max_boxes_tensor])
-            
+            YOLOEvaluationLayer(anchors=self.anchors, num_classes=len(self.class_names))(
+                inputs=[y1, y2, y3])
+
         self.final_model = keras.Model(inputs=[image_input],
                                        outputs=[out_boxes, out_scores, out_classes])
-        '''
+
         self.final_model.save('model_data/merged_keras.h5')
         print('{} model, anchors, and classes loaded.'.format(model_path))
 
@@ -343,6 +292,16 @@ def on_Where(ctx, node, name, args):
 
 def on_NonMaxSuppressionV3(ctx, node, name, args):
     node.type = "NonMaxSuppression"
+    node.domain = 'com.microsoft'
+    max_output_size = node.inputs[2].get_tensor_value()
+    node.set_attr("max_output_size", max_output_size)
+    iou_threshold = node.inputs[3].get_tensor_value()
+    node.set_attr("iou_threshold", iou_threshold)
+    score_threshold = node.inputs[4].get_tensor_value()
+    node.set_attr("score_threshold", score_threshold)
+    ctx.remove_input(node, node.input[4])
+    ctx.remove_input(node, node.input[3])
+    ctx.remove_input(node, node.input[2])
     return node
 
 
@@ -537,6 +496,22 @@ def convert_model(yolo, name):
                               debug_mode=True, custom_op_conversions=_custom_op_handlers)
     onnx.save_model(onnxmodel, name)
 
+import onnx
+import argparse
+import os
+
+def dump_scan(model, dir):
+    graph = model.graph
+    for node in graph.node:
+        if node.op_type == "Scan" or node.op_type == "Loop":
+            name = node.name
+            name = name.replace('/', '_')
+            body_attribute = list(filter(lambda attr: attr.name == 'body', node.attribute))
+            if len(body_attribute) > 0:
+                sub_model = onnx.ModelProto()
+                sub_model.graph.MergeFrom(body_attribute[0].g)
+                onnx.save_model(sub_model, os.path.join(dir, node.op_type + '_' + name + '.onnx'))
+                dump_scan(sub_model, dir)
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
@@ -545,6 +520,10 @@ if __name__ == '__main__':
 
     if '-c' in sys.argv:
         convert_model(YOLO(), 'model_data/yolov3.onnx')
+    elif '-d' in sys.argv:
+        model = onnx.load_model('model_data/yolov3.onnx')
+        out = os.path.abspath('dump_file')
+        dump_scan(model, out)
     else:
         input("Press Enter to continue...")
         detect_img(YOLO(), sys.argv[1])

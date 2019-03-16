@@ -9,7 +9,6 @@ from keras.layers import advanced_activations as adv_activations
 
 from ..common import with_variable
 from ..common.onnx_ops import apply_identity, apply_reshape
-from ..common.utils import GRAPH_OUTMOST_NAME
 
 from .activation import convert_keras_activation
 from .adv_activation import convert_keras_advanced_activation
@@ -47,6 +46,27 @@ def convert_keras_reshape(scope, operator, container):
 
 def convert_keras_training_only_layer(scope, operator, container):
     apply_identity(scope, operator.inputs[0].full_name, operator.outputs[0].full_name, container)
+
+
+def build_opdict_from_keras(model):
+    # type: (keras.Model) -> {}
+
+    output_dict = {}
+    for l_ in model.layers:
+        if hasattr(l_, 'layers'):
+            submodel_dict = build_opdict_from_keras(l_)
+            shared_layer = False
+            for node_ in extract_inbound_nodes(l_):
+                shared_layer |= any(
+                    ts_.name not in submodel_dict for ts_ in node_.output_tensors)
+            if not shared_layer:  # shared layer will be handled with the sub-model granularity.
+                continue
+
+        for node_ in extract_inbound_nodes(l_):
+            for ts_ in node_.output_tensors:
+                output_dict[ts_.name] = (l_, model)
+
+    return output_dict
 
 
 keras_layer_to_operator = {
@@ -93,41 +113,6 @@ keras_layer_to_operator = {
     LSTM: convert_keras_lstm,
     Bidirectional: convert_bidirectional
 }
-
-'''
-def build_opdict_from_keras(model):
-    # type: (keras.Model) -> []
-
-    output_dict = {}
-    for l_ in model.layers:
-        if hasattr(l_, 'layers'):
-            dict = build_opdict_from_keras(l_)
-            output_dict.update(dict)
-            continue
-
-        if type(l_) in keras_layer_to_operator:
-            for node_ in extract_inbound_nodes(l_):
-                for ts_ in node_.output_tensors:
-                    output_dict[GRAPH_OUTMOST_NAME + '/' + ts_.op.name] = l_
-
-    return output_dict
-'''
-
-def build_opdict_from_keras(model):
-    # type: (keras.Model) -> []
-
-    output_dict = {}
-    for l_ in model.layers:
-        if hasattr(l_, 'layers'):
-            dict = build_opdict_from_keras(l_)
-            output_dict.update(dict)
-            continue
-
-        for node_ in extract_inbound_nodes(l_):
-            for ts_ in node_.output_tensors:
-                output_dict[GRAPH_OUTMOST_NAME + '/' + ts_.op.name] = l_
-
-    return output_dict
 
 @with_variable('loaded')
 def static_set_ke2onnx_converters(func_set_converter):
