@@ -181,8 +181,6 @@ def _finalize_tf2onnx_op(topo, operator, varset):
     outputs = []
     with subgraph.as_default():
         for n0_ in nodes:
-            if (n0_.name == "imp_root_/yolo_evaluation_layer_1/imp_root_/yolo_evaluation_layer_1/concat_12"):
-                a = 1
             for i_, n_ in enumerate(n0_.outputs):
                 idf_ = tf.identity(subgraph.get_tensor_by_name(operator.full_name + '/' + n_.name), operator.full_name + '_identity')
                 outputs.append(idf_.name)

@@ -36,7 +36,7 @@ class TestKerasTF2ONNX(unittest.TestCase):
             os.mkdir(tmp_path)
         return os.path.join(tmp_path, name)
 
-    def run_onnx_runtime(self, case_name, onnx_model, data, expected, rtol=1.e-4, atol=1.e-8):
+    def run_onnx_runtime(self, case_name, onnx_model, data, expected, rtol=1.e-3, atol=1.e-6):
         temp_model_file = TestKerasTF2ONNX.get_temp_file('temp_' + case_name + '.onnx')
         onnx.save_model(onnx_model, temp_model_file)
         try:
@@ -638,34 +638,6 @@ class TestKerasTF2ONNX(unittest.TestCase):
         expected = keras_model.predict(x)
         self.assertTrue(self.run_onnx_runtime('recursive_and_shared', onnx_model, x, expected))
 
-    def test_arange(self):
-        from keras import backend as K
-        from keras.layers import Input, Concatenate, Lambda
-        img_w = 10
-        img_h = 20
-        input_shape = (img_w, img_h)
-        input = Input(shape=input_shape, dtype='float32')
-
-        def concatTile(input):
-            grid_y = K.tile(K.reshape(K.arange(0, stop=K.shape(input)[0]), [-1, 1, 1, 1]),
-                            [1, K.shape(input)[1], 1, 1])
-            grid_x = K.tile(K.reshape(K.arange(0, stop=K.shape(input)[1]), [1, -1, 1, 1]),
-                            [K.shape(input)[0], 1, 1, 1])
-            grid = K.concatenate([grid_x, grid_y])
-            return grid
-
-        def concatTile_output_shape(input_shape):
-            return (2*K.shape(input)[0], K.shape(input)[1], 1, 1)
-
-        layer = Lambda(concatTile, output_shape=concatTile_output_shape)
-        x_grid = layer(input)
-
-        keras_model = keras.Model(inputs=input, outputs=x_grid)
-        onnx_model = keras2onnx.convert_keras(keras_model, keras_model.name)
-        x = np.random.rand(1, img_w, img_h)
-        expected = keras_model.predict(x)
-        self.assertTrue(self.run_onnx_runtime('arange', onnx_model, x, expected))
-
     def test_channel_first_input(self):
         N, W, H, C = 2, 5, 6, 3
         inp1 = keras.layers.Input(batch_shape=(N, W, H, C), name='input1')
@@ -712,7 +684,6 @@ class TestKerasTF2ONNX(unittest.TestCase):
 
             preds = model.predict(x)
             onnx_model = keras2onnx.convert_keras(model, model.name)
-            onnx.save_model(onnx_model, 'temp_old.onnx')
             self.assertTrue(self.run_onnx_runtime(model_name, onnx_model, x, preds, rtol=rtol, atol=atol))
         except FileNotFoundError:
             self.assertTrue(False, 'The image data does not exist.')
@@ -727,10 +698,8 @@ class TestKerasTF2ONNX(unittest.TestCase):
     def test_MobileNetV2(self):
         from keras.applications import mobilenet_v2
         model = mobilenet_v2.MobileNetV2(weights='imagenet')
-        model.save('mobile.h5')
         self._test_keras_model(model)
 
 
 if __name__ == "__main__":
     unittest.main()
-

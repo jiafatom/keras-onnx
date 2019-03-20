@@ -81,7 +81,8 @@ class YOLOEvaluationLayer(keras.layers.Layer):
             classes_.append(classes)
         boxes_ = K.concatenate(boxes_, axis=0)
         scores_ = K.concatenate(scores_, axis=0)
-        classes_ = K.concatenate(classes_, axis=0)
+        #classes_ = K.concatenate(classes_, axis=0)
+        classes_ = K.constant(self.max_boxes, dtype='int32')
 
         return [boxes_, scores_, classes_]
 
@@ -208,20 +209,20 @@ class YOLO(object):
             new_image_size = (image.width - (image.width % 32),
                               image.height - (image.height % 32))
             boxed_image = letterbox_image(image, new_image_size)
-        image_data = np.array(boxed_image, dtype='float32')
-        image_data = np.transpose(image_data, [2, 0, 1])
+        boxed_image_resize = boxed_image.resize((224,224))
+        image_data = np.array(boxed_image_resize, dtype='float32')
+        #image_data = np.transpose(image_data, [2, 0, 1])
 
         print(image_data.shape)
         image_data /= 255.
         image_data = np.expand_dims(image_data, 0)  # Add batch dimension.
 
-        r = self.onnx_inference({'input_1_0': image_data},
+        r = self.onnx_inference({'input_1_1:01': image_data},
                                 ['conv2d_59_BiasAdd_01',
                                  'conv2d_67_BiasAdd_01',
                                  'conv2d_75_BiasAdd_01'])
 
-        boxes, box_scores, mask, max_boxes_tensor = self.sess.run(
-        # out_boxes, out_scores, out_classes = self.sess.run(
+        out_boxes, out_scores, out_classes = self.sess.run(
             [self.boxes, self.scores, self.classes],
             feed_dict={
                 self.i0: r[0],
@@ -230,7 +231,7 @@ class YOLO(object):
                 self.input_image_shape: [image.size[1], image.size[0]],
                 K.learning_phase(): 0
             })
-        '''
+
         print('Found {} boxes for {}'.format(len(out_boxes), 'img'))
 
         font = ImageFont.truetype(font='font/FiraMono-Medium.otf',
@@ -272,7 +273,6 @@ class YOLO(object):
         end = timer()
         print("time=", end - start)
         return image
-        '''
 
 def detect_img(yolo, name):
     import onnxruntime
@@ -298,6 +298,8 @@ def on_NonMaxSuppressionV3(ctx, node, name, args):
     iou_threshold = node.inputs[3].get_tensor_value()
     node.set_attr("iou_threshold", iou_threshold)
     score_threshold = node.inputs[4].get_tensor_value()
+    if score_threshold < 0.0:
+        score_threshold = float(0.0)
     node.set_attr("score_threshold", score_threshold)
     ctx.remove_input(node, node.input[4])
     ctx.remove_input(node, node.input[3])
@@ -340,13 +342,21 @@ def on_StridedSlice(ctx, node, name, args):
     axes = []
     # onnx slice op can't remove a axis, track axis and add a squeeze op if needed
     needs_squeeze = []
+    reverse_axes = []
     for idx, begin_item in enumerate(begin):
         end_item = end[idx]
+        if strides[idx] == -1:
+            reverse_axes.append(idx)
         # if strides[idx] != 1:
         # raise ValueError("StridedSlice: only strides=1 is supported, current stride =" + str(strides[idx]))
         axes.append(idx)
 
-        if (ellipsis_mask >> idx) & 1:
+        if (begin_mask >> idx) & 1 != 0 and (end_mask >> idx) & 1 != 0:
+            new_begin.append(0)
+            new_end.append(max_size)
+            continue
+
+        if begin_item == 0 and end_item == 0:
             new_begin.append(0)
             new_end.append(max_size)
             continue
@@ -359,12 +369,16 @@ def on_StridedSlice(ctx, node, name, args):
         if mask != 0:
             new_begin.append(begin_item)
             new_end.append(end_item)
+            if begin_item == 0 and end_item == 0:
+                aa = 1
             needs_squeeze.append(idx)
             continue
 
         if (begin_mask >> idx) & 1 != 0:
             new_begin.append(0)
             new_end.append(end_item)
+            if end_item == 0:
+                aa = 1
             continue
 
         if (end_mask >> idx) & 1 != 0:
@@ -372,6 +386,8 @@ def on_StridedSlice(ctx, node, name, args):
             new_end.append(max_size)
             continue
 
+        if begin_item == 0 and end_item == 0:
+            aa = 1
         new_begin.append(begin_item)
         new_end.append(end_item)
 
@@ -383,9 +399,28 @@ def on_StridedSlice(ctx, node, name, args):
     ctx.remove_input(node, node.input[2])
     ctx.remove_input(node, node.input[1])
     nodes = [node]
-
+    '''
+    reverse_flag = False
+    if len(reverse_axes) > 0:
+        name = utils.make_name(node.name)
+        name = name + '_reverse'
+        reverse_node = ctx.insert_new_node_on_output("Reverse", node.output[0], name)
+        reverse_node.set_attr("axes", reverse_axes)
+        reverse_node.domain = 'com.microsoft'
+        nodes.append(reverse_node)
+        input_dtype = ctx.get_dtype(node.output[0])
+        ctx.set_dtype(reverse_node.output[0], input_dtype)
+        ctx.copy_shape(node.output[0], reverse_node.output[0])
+        reverse_flag = True
+    '''
     if needs_squeeze:
         name = utils.make_name(node.name)
+        '''
+        if reverse_flag:
+            squeeze_node = ctx.insert_new_node_on_output("Squeeze", reverse_node.output[0], name)
+        else:
+            squeeze_node = ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
+        '''
         squeeze_node = ctx.insert_new_node_on_output("Squeeze", node.output[0], name)
         squeeze_node.set_attr("axes", needs_squeeze)
         nodes.append(squeeze_node)

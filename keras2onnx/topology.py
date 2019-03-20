@@ -263,11 +263,6 @@ def convert_topology(topology, model_name, doc_string, target_opset, channel_fir
         # either optimizer issue or converter issue, we just let it go to diagnose the issue from the converted model.
         nodes = container.nodes
 
-    for node in nodes:
-        if node.name == "yolo_evaluation_layer_1_imp_root__yolo_evaluation_layer_1_Reshape_15_shape_Concat__320":
-            a = 1
-
-    #nodes = container.nodes
     file_tot = open("tf_nodes.txt", "w")
     for node in nodes:
         file_tot.write(node.name+'    ')
