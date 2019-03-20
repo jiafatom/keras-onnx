@@ -23,8 +23,6 @@ def tf2onnx_wrap(topo, graph, outputs, target_opset):
                          opset=target_opset,
                          custom_op_handlers=topo.custom_op_dict,
                          output_names=outputs)
-        #sess = tf.Session()
-        #tf.io.write_graph(graph, 'pb_graph', outputs[0].replace(':', '_') + '.pb', as_text=False)
         return g
 
     except Exception as e:
@@ -63,23 +61,7 @@ def tfnode_convert(varset, operator, container):
     else:
         # create initializers for constant nodes
         initializers = []
-
         for op in g.get_nodes():
-            '''
-            temp_name = 'TFNodes/yolo_evaluation_layer_1/arange_4'
-            print(op.name)
-            if op.name.startswith(temp_name):
-                bb = 1
-            if hasattr(op, 'attr') and 'body' in op.attr:                
-                subprotobuf = op.get_attr('body')
-                cur_str = subprotobuf.SerializeToString()
-                cur_str = cur_str.replace(b'/delta:', b'_delta_')
-                cur_str = cur_str.replace(b'layer_1/', b'layer_1_')
-                cur_str = cur_str.replace(b'TFNodes/', b'TFNodes_')
-                subprotobuf.ParseFromString(cur_str)
-                op.attr['body'] = subprotobuf
-                aa = 1
-            '''
             all_inputs |= set(op.input)
             if op.is_const():
                 const_val = op.get_tensor_value(as_list=False)
@@ -91,21 +73,10 @@ def tfnode_convert(varset, operator, container):
             else:
                 update_container(varset, op, container)
 
-    from onnx import TensorProto
     for init_tensor_ in initializers:
-        # init_tensor_.name = varset.get_local_variable_or_declare_one(init_tensor_.name).full_name.encode('utf-8')
         init_tensor_.name = varset.get_local_variable_or_declare_one(init_tensor_.name).full_name.encode('utf-8')
         container.add_initializer_from_tensor(init_tensor_)
-        '''
-        if init_tensor_.name.endswith('delta_0'):
-            new_tensor = TensorProto()
-            new_tensor.CopyFrom(init_tensor_)
-            new_tensor.name = new_tensor.name.replace('delta_0', 'delta:0')
-            new_tensor.name = new_tensor.name.replace('_', '/')
-            new_tensor.name = new_tensor.name.replace('yolo/evaluation/layer/1', 'yolo_evaluation_layer_1')
-            new_tensor.name = new_tensor.name.replace('arange/', 'arange_')
-            container.add_initializer_from_tensor(new_tensor)
-        '''
+
 
 TFNODES = 'TFNodes'
 set_converter(TFNODES, tfnode_convert)

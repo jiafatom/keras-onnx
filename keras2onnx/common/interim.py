@@ -421,11 +421,6 @@ class Variable:
 
     @staticmethod
     def tfname_to_onnx(name):
-        '''
-        name = re.sub('[^0-9a-zA-Z]', '_', name)  # Only alphabets and numbers are allowed
-        if re.match('^[0-9]', name):  # The first symbol cannot be a number
-            name = '_' + name
-        '''
         return name
 
     @staticmethod

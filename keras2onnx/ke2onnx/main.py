@@ -114,6 +114,7 @@ keras_layer_to_operator = {
     Bidirectional: convert_bidirectional
 }
 
+
 @with_variable('loaded')
 def static_set_ke2onnx_converters(func_set_converter):
     for ky_, val_ in six.iteritems(keras_layer_to_operator):
